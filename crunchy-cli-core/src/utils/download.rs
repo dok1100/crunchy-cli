@@ -13,19 +13,20 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressFinish, ProgressStyle};
 use log::{debug, warn, LevelFilter};
 use regex::Regex;
 use reqwest::Client;
-use rsubs_lib::{SSA, VTT};
+//use rsubs_lib::{SSA, VTT};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
-use std::ops::Add;
+//use std::ops::Add;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fs};
 use tempfile::TempPath;
-use time::Time;
+//use time::Time;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
@@ -929,45 +930,50 @@ impl Downloader {
         subtitle: Subtitle,
         max_length: TimeDelta,
     ) -> Result<TempPath> {
-        let buf = subtitle.data().await?;
-        let mut ass = match subtitle.format.as_str() {
-            "ass" => SSA::parse(String::from_utf8_lossy(&buf))?,
-            "vtt" => VTT::parse(String::from_utf8_lossy(&buf))?.to_ssa(),
-            _ => bail!("unknown subtitle format: {}", subtitle.format),
-        };
+        // let buf = subtitle.data().await?;
+        // let mut ass = match subtitle.format.as_str() {
+        //     "ass" => SSA::parse(String::from_utf8_lossy(&buf))?,
+        //     "vtt" => VTT::parse(String::from_utf8_lossy(&buf))?.to_ssa(),
+        //     _ => bail!("unknown subtitle format: {}", subtitle.format),
+        // };
         // subtitles aren't always correct sorted and video players may have issues with that. to
         // prevent issues, the subtitles are sorted
         // (https://github.com/crunchy-labs/crunchy-cli/issues/208)
-        ass.events.sort_by(|a, b| a.start.cmp(&b.start));
+        // ass.events.sort_by(|a, b| a.start.cmp(&b.start));
         // it might be the case that the start and/or end time are greater than the actual video
         // length. this might also result in issues with video players, thus the times are stripped
         // to be at most as long as `max_length`
         // (https://github.com/crunchy-labs/crunchy-cli/issues/32)
-        for i in (0..ass.events.len()).rev() {
-            let max_len = Time::from_hms(0, 0, 0)
-                .unwrap()
-                .add(Duration::from_millis(max_length.num_milliseconds() as u64));
+        // for i in (0..ass.events.len()).rev() {
+        //     let max_len = Time::from_hms(0, 0, 0)
+        //         .unwrap()
+        //         .add(Duration::from_millis(max_length.num_milliseconds() as u64));
 
-            if ass.events[i].start > max_len {
-                if ass.events[i].end > max_len {
-                    ass.events[i].start = max_len
-                }
-                ass.events[i].end = max_len
-            } else {
-                break;
-            }
-        }
+        //     if ass.events[i].start > max_len {
+        //         if ass.events[i].end > max_len {
+        //             ass.events[i].start = max_len
+        //         }
+        //         ass.events[i].end = max_len
+        //     } else {
+        //         break;
+        //     }
+        // }
 
         // without this additional info, subtitle look very messy in some video player
         // (https://github.com/crunchy-labs/crunchy-cli/issues/66)
-        ass.info
-            .additional_fields
-            .insert("ScaledBorderAndShadow".to_string(), "yes".to_string());
+        // ass.info
+        //     .additional_fields
+        //     .insert("ScaledBorderAndShadows".to_string(), "yes".to_string());
 
         let tempfile = tempfile(".ass")?;
-        let path = tempfile.into_temp_path();
+        // let path = tempfile.into_temp_path();
+		let (mut file, path) = tempfile.into_parts();
+				
+        let mut buf = subtitle.data().await?;
+        fix_subtitles(&mut buf, max_length);
 
-        fs::write(&path, ass.to_string())?;
+        // fs::write(&path, ass.to_string())?;
+		file.write_all(buf.as_slice())?;
 
         Ok(path)
     }
@@ -1329,6 +1335,78 @@ fn get_subtitle_stats(path: &Path) -> Result<Vec<String>> {
     }
 
     Ok(fonts)
+}
+
+fn fix_subtitles(raw: &mut Vec<u8>, max_length: TimeDelta) {
+    let re = Regex::new(
+        r"^Dialogue:\s(?P<layer>\d+),(?P<start>\d+:\d+:\d+\.\d+),(?P<end>\d+:\d+:\d+\.\d+),",
+    )
+    .unwrap();
+
+    let mut entries = (vec![], vec![]);
+
+    let mut as_lines: Vec<String> = String::from_utf8_lossy(raw.as_slice())
+        .split('\n')
+        .map(|s| s.to_string())
+        .collect();
+
+    for (i, line) in as_lines.iter_mut().enumerate() {
+        if line.trim() == "[Script Info]" {
+            line.push_str("\nScaledBorderAndShadow: yes")
+        } else if let Some(capture) = re.captures(line) {
+            let mut start = capture
+                .name("start")
+                .map_or(NaiveTime::default(), |s| {
+                    NaiveTime::parse_from_str(s.as_str(), "%H:%M:%S.%f").unwrap()
+                })
+                .signed_duration_since(NaiveTime::MIN);
+            let mut end = capture
+                .name("end")
+                .map_or(NaiveTime::default(), |e| {
+                    NaiveTime::parse_from_str(e.as_str(), "%H:%M:%S.%f").unwrap()
+                })
+                .signed_duration_since(NaiveTime::MIN);
+
+            if start > max_length || end > max_length {
+                let layer = capture
+                    .name("layer")
+                    .map_or(0, |l| i32::from_str(l.as_str()).unwrap());
+
+                if start > max_length {
+                    start = max_length;
+                }
+                if start > max_length || end > max_length {
+                    end = max_length;
+                }
+
+                *line = re
+                    .replace(
+                        line,
+                        format!(
+                            "Dialogue: {},{},{},",
+                            layer,
+                            format_time_delta(&start),
+                            format_time_delta(&end)
+                        ),
+                    )
+                    .to_string()
+            }
+            entries.0.push((start, i));
+            entries.1.push(i)
+        }
+    }
+
+    entries.0.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for i in 0..entries.0.len() {
+        let (_, original_position) = entries.0[i];
+        let new_position = entries.1[i];
+
+        if original_position != new_position {
+            as_lines.swap(original_position, new_position)
+        }
+    }
+
+    *raw = as_lines.join("\n").into_bytes()
 }
 
 fn write_ffmpeg_chapters(
