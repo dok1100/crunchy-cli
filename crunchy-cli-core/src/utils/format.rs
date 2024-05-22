@@ -167,18 +167,19 @@ impl SingleFormat {
 
     pub async fn stream(&self) -> Result<Stream> {
         let stream = match &self.source {
-            MediaCollection::Episode(e) => e.stream_maybe_without_drm().await?,
-            MediaCollection::Movie(m) => m.stream_maybe_without_drm().await?,
-            MediaCollection::MusicVideo(mv) => mv.stream_maybe_without_drm().await?,
-            MediaCollection::Concert(c) => c.stream_maybe_without_drm().await?,
+            MediaCollection::Episode(e) => e.stream_maybe_without_drm().await,
+            MediaCollection::Movie(m) => m.stream_maybe_without_drm().await,
+            MediaCollection::MusicVideo(mv) => mv.stream_maybe_without_drm().await,
+            MediaCollection::Concert(c) => c.stream_maybe_without_drm().await,
             _ => unreachable!(),
         };
 
-        if stream.session.uses_stream_limits {
-            bail!("Found a stream which probably uses DRM. DRM downloads aren't supported")
-        }
-
-        Ok(stream)
+        if let Err(crunchyroll_rs::error::Error::Request { message, .. }) = &stream {
+            if message.starts_with("TOO_MANY_ACTIVE_STREAMS") {
+                bail!("Too many active/parallel streams. Please close at least one stream you're watching and try again")
+            }
+        };
+        Ok(stream?)
     }
 
     pub async fn skip_events(&self) -> Result<Option<SkipEvents>> {
